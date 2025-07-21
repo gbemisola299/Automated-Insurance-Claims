@@ -476,3 +476,132 @@
    (ok policy-id)
  )
 )
+  
+;; Add a condition to policy
+(define-public (add-policy-condition
+ (policy-id uint)
+ (weather-type uint)
+ (operator uint)
+ (threshold-value uint)
+ (payout-percentage uint)
+ (oracle-id (string-ascii 36))
+)
+ (let
+   (
+     (policy (unwrap! (get-policy policy-id) (err ERR-POLICY-NOT-FOUND)))
+     (condition-index u0) ;; For simplicity, we only allow one condition per policy
+   )
+  
+   ;; Check if caller is policy holder
+   (asserts! (is-eq tx-sender (get policyholder policy)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Check if policy is active
+   (asserts! (is-eq (get policy-status policy) POLICY-STATUS-ACTIVE) (err ERR-POLICY-NOT-ACTIVE))
+  
+   ;; Check if oracle exists
+   (asserts! (is-some (get-oracle oracle-id)) (err ERR-ORACLE-NOT-REGISTERED))
+  
+   ;; Validate payout percentage (max 100%)
+   (asserts! (<= payout-percentage u10000) (err ERR-INVALID-PARAMETERS))
+  
+   ;; Add condition
+   (map-set policy-conditions
+     { policy-id: policy-id, condition-index: condition-index }
+     {
+       weather-type: weather-type,
+       operator: operator,
+       threshold-value: threshold-value,
+       payout-percentage: payout-percentage,
+  oracle-id: oracle-id
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+;; Submit a claim
+(define-public (submit-claim (policy-id uint))
+ (let
+   (
+     (policy (unwrap! (get-policy policy-id) (err ERR-POLICY-NOT-FOUND)))
+     (claim-id (var-get next-claim-id))
+     (claim-index u0) ;; For simplicity, we only allow one claim per policy
+   )
+  
+   ;; Check if caller is policy holder
+   (asserts! (is-eq tx-sender (get policyholder policy)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Check if policy is active
+   (asserts! (is-policy-active policy-id) (err ERR-POLICY-NOT-ACTIVE))
+  
+   ;; Check if policy hasn't been claimed yet
+   (asserts! (not (is-eq (get policy-status policy) POLICY-STATUS-CLAIMED)) (err ERR-ALREADY-CLAIMED))
+  
+   ;; Check if policy is claimable (condition met)
+   (asserts! (is-policy-claimable policy-id) (err ERR-CLAIM-CONDITION-NOT-MET))
+  
+   ;; Process the claim
+   (let
+     (
+       (condition (unwrap! (map-get? policy-conditions { policy-id: policy-id, condition-index: u0 }) (err ERR-INVALID-PARAMETERS)))
+       (oracle-data-value (unwrap! (get-latest-oracle-data (get oracle-id condition)) (err ERR-NO-ORACLE-DATA)))
+       (payout-percentage (get payout-percentage condition))
+
+            (claim-amount (/ (* (get coverage-amount policy) payout-percentage) u10000))
+     )
+    
+;; Create claim record
+     (map-set claims
+       { claim-id: claim-id }
+       {
+         policy-id: policy-id,
+         claimant: tx-sender,
+         claim-status: CLAIM-STATUS-APPROVED, ;; Auto-approved for parametric insurance
+         claim-amount: claim-amount,
+         weather-event-type: (get weather-type condition),
+         weather-event-value: (get value oracle-data-value),
+         condition-index: u0,
+         submitted-block: stacks-block-height,
+         processed-block: (some stacks-block-height),
+         paid-block: none,
+         oracle-data-block: stacks-block-height
+       }
+     )
+    
+     ;; Link claim to policy
+     (map-set policy-claims
+       { policy-id: policy-id, claim-index: claim-index }
+       { claim-id: claim-id }
+     )
+    
+     ;; Update policy status
+     (map-set policies
+       { policy-id: policy-id }
+       (merge policy {
+         policy-status: POLICY-STATUS-CLAIMED,
+last-updated: stacks-block-height
+       })
+     )
+    
+     ;; Increment claim ID counter
+     (var-set next-claim-id (+ claim-id u1))
+    
+     (ok claim-id)
+   )
+ )
+)
+
+
+;; Process claim payment
+(define-public (process-claim-payment (claim-id uint))
+ (let
+   (
+     (claim (unwrap! (get-claim claim-id) (err ERR-CLAIM-NOT-FOUND)))
+     (policy (unwrap! (get-policy (get policy-id claim)) (err ERR-POLICY-NOT-FOUND)))
+   )
+  
+   ;; Check if claim is approved but not paid
+   (asserts! (is-eq (get claim-status claim) CLAIM-STATUS-APPROVED) (err ERR-INVALID-PARAMETERS))
+   (asserts! (is-none (get paid-block claim)) (err ERR-ALREADY-CLAIMED))
+  
