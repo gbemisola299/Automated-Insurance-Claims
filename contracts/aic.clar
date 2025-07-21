@@ -256,3 +256,33 @@
    false
  )
 )
+;; Check if any condition for a policy is met
+(define-read-only (some-condition-met (policy-id uint))
+ ;; In a real implementation, this would check all conditions for the policy
+ ;; For simplicity, we just check condition at index 0
+ (match (map-get? policy-conditions { policy-id: policy-id, condition-index: u0 })
+   condition
+   (let
+     (
+       (oracle-id (get oracle-id condition))
+       (weather-type (get weather-type condition))
+       (operator (get operator condition))
+       (threshold (get threshold-value condition))
+     )
+     (match (get-latest-oracle-data oracle-id)
+       oracle-data-value
+       (if (is-eq (get weather-type oracle-data-value) weather-type)
+         (let
+           (
+             (current-value (get value oracle-data-value))
+           )
+           (condition-check operator current-value threshold)
+         )
+         false
+       )
+       false
+     )
+   )
+   false
+ )
+)
