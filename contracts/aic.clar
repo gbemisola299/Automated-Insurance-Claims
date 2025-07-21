@@ -134,3 +134,155 @@
  }
 )
 
+
+;; Maps for claims
+(define-map claims
+ { claim-id: uint }
+ {
+   policy-id: uint,
+   claimant: principal,
+   claim-status: uint,
+   claim-amount: uint,
+   weather-event-type: uint,
+   weather-event-value: uint,
+   condition-index: uint,
+   submitted-block: uint,
+   processed-block: (optional uint),
+   paid-block: (optional uint),
+   oracle-data-block: uint
+ }
+)
+
+
+;; Maps for claim history by policy
+(define-map policy-claims
+ { policy-id: uint, claim-index: uint }
+ { claim-id: uint }
+)
+
+
+;; Maps for policy count by user
+(define-map user-policy-count
+ { user: principal }
+ { count: uint }
+)
+
+
+;; Maps for policy indices by user
+(define-map user-policies
+ { user: principal, index: uint }
+ { policy-id: uint }
+)
+
+;; Read-only functions
+
+
+;; Get policy details
+(define-read-only (get-policy (policy-id uint))
+ (map-get? policies { policy-id: policy-id })
+)
+
+
+;; Get claim details
+(define-read-only (get-claim (claim-id uint))
+ (map-get? claims { claim-id: claim-id })
+)
+
+
+;; Get risk profile details
+(define-read-only (get-risk-profile (profile-id uint))
+ (map-get? risk-profiles { profile-id: profile-id })
+)
+
+
+;; Get oracle details
+(define-read-only (get-oracle (oracle-id (string-ascii 36)))
+ (map-get? oracle-registry { oracle-id: oracle-id })
+)
+
+
+;; Get oracle data
+(define-read-only (get-oracle-data (oracle-id (string-ascii 36)) (block-height uint))
+ (map-get? oracle-data { oracle-id: oracle-id, block-height: block-height })
+)
+
+
+;; Get latest oracle data
+(define-read-only (get-latest-oracle-data (oracle-id (string-ascii 36)))
+ (get-oracle-data oracle-id stacks-block-height)
+)
+
+;; Calculate premium for a given risk profile and coverage amount
+(define-read-only (calculate-premium (profile-id uint) (coverage-amount uint) (location (string-utf8 100)))
+ (match (get-risk-profile profile-id)
+   profile
+   (let
+     (
+       (base-rate (get base-premium-rate profile))
+       (risk-factor (get risk-factor profile))
+       ;; In a real contract, location might affect premium calculation
+       ;; For simplicity, we're ignoring location in this implementation
+       (premium (/ (* coverage-amount (+ base-rate risk-factor)) u10000))
+     )
+     (ok premium)
+   )
+   (err ERR-INVALID-RISK-PROFILE)
+ )
+)
+
+
+;; Check if a policy is active
+(define-read-only (is-policy-active (policy-id uint))
+ (match (get-policy policy-id)
+   policy
+   (and
+     (is-eq (get policy-status policy) POLICY-STATUS-ACTIVE)
+     (>= stacks-block-height (get start-block policy))
+     (<= stacks-block-height (get end-block policy))
+   )
+   false
+ )
+)
+
+
+;; Check if a policy is claimable based on oracle data
+(define-read-only (is-policy-claimable (policy-id uint))
+ (match (get-policy policy-id)
+   policy
+   (if (is-policy-active policy-id)
+     (some-condition-met policy-id)
+     false
+   )
+   false
+ )
+)
+;; Check if any condition for a policy is met
+(define-read-only (some-condition-met (policy-id uint))
+ ;; In a real implementation, this would check all conditions for the policy
+ ;; For simplicity, we just check condition at index 0
+ (match (map-get? policy-conditions { policy-id: policy-id, condition-index: u0 })
+   condition
+   (let
+     (
+       (oracle-id (get oracle-id condition))
+       (weather-type (get weather-type condition))
+       (operator (get operator condition))
+       (threshold (get threshold-value condition))
+     )
+     (match (get-latest-oracle-data oracle-id)
+       oracle-data-value
+       (if (is-eq (get weather-type oracle-data-value) weather-type)
+         (let
+           (
+             (current-value (get value oracle-data-value))
+           )
+           (condition-check operator current-value threshold)
+         )
+         false
+       )
+       false
+     )
+   )
+   false
+ )
+)
