@@ -605,3 +605,205 @@ last-updated: stacks-block-height
    (asserts! (is-eq (get claim-status claim) CLAIM-STATUS-APPROVED) (err ERR-INVALID-PARAMETERS))
    (asserts! (is-none (get paid-block claim)) (err ERR-ALREADY-CLAIMED))
   
+;; Check if treasury has enough balance
+   (asserts! (>= (var-get treasury-balance) (get claim-amount claim)) (err ERR-PAYMENT-FAILED))
+  
+   ;; Process payment
+   (try! (as-contract (stx-transfer? (get claim-amount claim) tx-sender (get claimant claim))))
+  
+   ;; Update treasury
+   (var-set treasury-balance (- (var-get treasury-balance) (get claim-amount claim)))
+   (var-set total-claims-paid (+ (var-get total-claims-paid) (get claim-amount claim)))
+  
+   ;; Update claim status
+   (map-set claims
+     { claim-id: claim-id }
+     (merge claim {
+       claim-status: CLAIM-STATUS-PAID,
+       paid-block: (some stacks-block-height)
+     })
+   )
+  
+   (ok true)
+ )
+)
+
+;; Renew a policy
+(define-public (renew-policy (policy-id uint) (duration-blocks uint))
+ (let
+   (
+     (policy (unwrap! (get-policy policy-id) (err ERR-POLICY-NOT-FOUND)))
+   )
+  
+   ;; Check if caller is policy holder
+   (asserts! (is-eq tx-sender (get policyholder policy)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Check if policy has expired but wasn't claimed
+   (asserts! (and
+              (> stacks-block-height (get end-block policy))
+              (not (is-eq (get policy-status policy) POLICY-STATUS-CLAIMED))
+             )
+             (err ERR-POLICY-NOT-EXPIRED))
+  
+   ;; Calculate new premium
+   (let
+     (
+       (premium-result (unwrap! (calculate-premium
+                                (get risk-profile-id policy)
+                                (get coverage-amount policy)
+                                (get location policy))
+                              (err ERR-INVALID-PARAMETERS)))
+)
+    
+     ;; Collect premium payment
+     (try! (stx-transfer? premium-result tx-sender (as-contract tx-sender)))
+    
+     ;; Update treasury
+     (var-set treasury-balance (+ (var-get treasury-balance) premium-result))
+     (var-set total-premiums-collected (+ (var-get total-premiums-collected) premium-result))
+    
+     ;; Update policy
+     (map-set policies
+       { policy-id: policy-id }
+       (merge policy {
+         premium-amount: premium-result,
+         start-block: stacks-block-height,
+         end-block: (+ stacks-block-height duration-blocks),
+         policy-status: POLICY-STATUS-ACTIVE,
+         renewal-count: (+ (get renewal-count policy) u1),
+         last-updated: stacks-block-height
+       })
+     )
+    
+     (ok true)
+   )
+ )
+)
+;; Cancel a policy
+(define-public (cancel-policy (policy-id uint))
+ (let
+   (
+     (policy (unwrap! (get-policy policy-id) (err ERR-POLICY-NOT-FOUND)))
+   )
+  
+   ;; Check if caller is policy holder
+   (asserts! (is-eq tx-sender (get policyholder policy)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Check if policy is active
+   (asserts! (is-policy-active policy-id) (err ERR-POLICY-NOT-ACTIVE))
+  
+   ;; Update policy status
+   (map-set policies
+     { policy-id: policy-id }
+     (merge policy {
+       policy-status: POLICY-STATUS-CANCELED,
+       last-updated: stacks-block-height
+     })
+   )
+  
+   ;; Note: In a real implementation, we might refund a portion of the premium
+  (ok true)
+ )
+)
+
+
+;; Add or update a risk profile (admin only)
+(define-public (set-risk-profile
+ (profile-id uint)
+ (profile-name (string-utf8 100))
+ (base-premium-rate uint)
+ (coverage-multiplier uint)
+ (risk-factor uint)
+ (min-coverage uint)
+ (max-coverage uint)
+ (description (string-utf8 500))
+)
+ (begin
+   ;; Only contract owner can update risk profiles
+   (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+  
+   (map-set risk-profiles
+     { profile-id: profile-id }
+     {
+       profile-name: profile-name,
+       base-premium-rate: base-premium-rate,
+       coverage-multiplier: coverage-multiplier,
+
+
+        risk-factor: risk-factor,
+       min-coverage: min-coverage,
+       max-coverage: max-coverage,
+       description: description
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+
+;; Transfer contract ownership
+(define-public (transfer-ownership (new-owner principal))
+ (begin
+   (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+   (var-set contract-owner new-owner)
+   (ok true)
+ )
+)
+
+
+;; Initialize common risk profiles
+(map-set risk-profiles
+ { profile-id: u1 }
+ {
+   profile-name: u"Agricultural Drought Insurance",
+  base-premium-rate: u500, ;; 5%
+   coverage-multiplier: u1000, ;; 10x
+   risk-factor: u300, ;; 3%
+   min-coverage: u10000000, ;; 100 STX
+   max-coverage: u1000000000, ;; 10,000 STX
+   description: u"Insurance for farmers against drought conditions"
+ }
+)
+
+
+(map-set risk-profiles
+ { profile-id: u2 }
+ {
+   profile-name: u"Flood Insurance",
+   base-premium-rate: u750, ;; 7.5%
+   coverage-multiplier: u800, ;; 8x
+   risk-factor: u500, ;; 5%
+   min-coverage: u20000000, ;; 200 STX
+   max-coverage: u2000000000, ;; 20,000 STX
+   description: u"Insurance against flood damage"
+ }
+)
+
+
+(map-set risk-profiles
+ { profile-id: u3 }
+ {
+   profile-name: u"Hurricane Insurance",
+   base-premium-rate: u1000, ;; 10%
+   coverage-multiplier: u600, ;; 6x
+    risk-factor: u800, ;; 8%
+   min-coverage: u50000000, ;; 500 STX
+   max-coverage: u5000000000, ;; 50,000 STX
+   description: u"Insurance against hurricane damage"
+ }
+)
+
+
+(map-set risk-profiles
+ { profile-id: u4 }
+ {
+   profile-name: u"Frost Insurance",
+   base-premium-rate: u400, ;; 4%
+   coverage-multiplier: u1200, ;; 12x
+   risk-factor: u200, ;; 2%
+   min-coverage: u5000000, ;; 50 STX
+   max-coverage: u500000000, ;; 5,000 STX
+   description: u"Insurance for farmers against frost damage to crops"
+ }
+)
