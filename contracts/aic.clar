@@ -286,3 +286,322 @@
    false
  )
 )
+
+
+
+
+;; Helper function to check condition based on operator
+(define-read-only (condition-check (operator uint) (current-value uint) (threshold uint))
+ (if (is-eq operator OPERATOR-GREATER-THAN)
+   (> current-value threshold)
+   (if (is-eq operator OPERATOR-LESS-THAN)
+     (< current-value threshold)
+     (if (is-eq operator OPERATOR-EQUAL-TO)
+       (is-eq current-value threshold)
+       (if (is-eq operator OPERATOR-GREATER-THAN-OR-EQUAL)
+         (>= current-value threshold)
+         (if (is-eq operator OPERATOR-LESS-THAN-OR-EQUAL)
+           (<= current-value threshold)
+           false
+         )
+       )
+     )
+   )
+ )
+)
+
+
+;; Get all claims for a policy
+(define-read-only (get-policy-claims (policy-id uint))
+ ;; In a real implementation, this would return a list of all claims
+ ;; For simplicity, we just check if there's a claim at index 0
+ (map-get? policy-claims { policy-id: policy-id, claim-index: u0 })
+)
+
+
+;; Get treasury statistics
+(define-read-only (get-treasury-stats)
+ {
+   balance: (var-get treasury-balance),
+   total-premiums: (var-get total-premiums-collected),
+   total-claims-paid: (var-get total-claims-paid)
+ }
+)
+
+;; Public functions
+
+
+;; Register a new oracle
+(define-public (register-oracle
+ (oracle-id (string-ascii 36))
+ (oracle-name (string-utf8 100))
+ (oracle-type uint)
+)
+ (begin
+   ;; Only contract owner can register oracles
+   (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+  
+   (map-set oracle-registry
+     { oracle-id: oracle-id }
+     {
+       oracle-principal: tx-sender,
+       oracle-name: oracle-name,
+       oracle-type: oracle-type,
+       is-active: true,
+       registration-block: stacks-block-height
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+
+;; Submit oracle data
+(define-public (submit-oracle-data
+ (oracle-id (string-ascii 36))
+ (weather-type uint)
+ (location (string-utf8 100))
+ (value uint)
+ (timestamp uint)
+)
+ (let
+   (
+     (oracle (unwrap! (get-oracle oracle-id) (err ERR-ORACLE-NOT-REGISTERED)))
+   )
+  
+ ;; Only the registered oracle principal can submit data
+   (asserts! (is-eq tx-sender (get oracle-principal oracle)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Ensure oracle is active
+   (asserts! (get is-active oracle) (err ERR-ORACLE-NOT-REGISTERED))
+  
+   ;; Store oracle data
+   (map-set oracle-data
+     { oracle-id: oracle-id, block-height: stacks-block-height }
+     {
+       weather-type: weather-type,
+       location: location,
+       value: value,
+       timestamp: timestamp
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+
+;; Create a new insurance policy
+(define-public (create-policy
+ (risk-profile-id uint)
+ (coverage-amount uint)
+ (duration-blocks uint)
+ (auto-renew bool)
+ (location (string-utf8 100))
+)
+ (let
+   (
+     (policy-id (var-get next-policy-id))
+     (risk-profile (unwrap! (get-risk-profile risk-profile-id) (err ERR-INVALID-RISK-PROFILE)))
+     (premium-result (unwrap! (calculate-premium risk-profile-id coverage-amount location) (err ERR-INVALID-PARAMETERS)))
+   )
+  
+   ;; Validate coverage amount
+   (asserts! (and
+              (>= coverage-amount (get min-coverage risk-profile))
+             (<= coverage-amount (get max-coverage risk-profile))
+             )
+             (err ERR-INVALID-COVERAGE-AMOUNT))
+  
+   ;; Collect premium payment
+   (try! (stx-transfer? premium-result tx-sender (as-contract tx-sender)))
+  
+   ;; Update treasury
+   (var-set treasury-balance (+ (var-get treasury-balance) premium-result))
+   (var-set total-premiums-collected (+ (var-get total-premiums-collected) premium-result))
+  
+   ;; Create policy
+   (map-set policies
+     { policy-id: policy-id }
+     {
+       policyholder: tx-sender,
+       risk-profile-id: risk-profile-id,
+       coverage-amount: coverage-amount,
+       premium-amount: premium-result,
+       start-block: stacks-block-height,
+       end-block: (+ stacks-block-height duration-blocks),
+       policy-status: POLICY-STATUS-ACTIVE,
+       renewal-count: u0,
+       auto-renew: auto-renew,
+       location: location,
+       created-at: stacks-block-height,
+       last-updated: stacks-block-height
+     }
+   )
+  
+   ;; Update user policy tracking
+   (match (map-get? user-policy-count { user: tx-sender })
+     existing-count
+     (let
+       (
+         (new-count (+ (get count existing-count) u1))
+       )
+       (map-set user-policy-count
+
+
+          { user: tx-sender }
+         { count: new-count }
+       )
+       (map-set user-policies
+         { user: tx-sender, index: (- new-count u1) }
+         { policy-id: policy-id }
+       )
+     )
+     (begin
+       (map-set user-policy-count
+         { user: tx-sender }
+         { count: u1 }
+       )
+       (map-set user-policies
+         { user: tx-sender, index: u0 }
+         { policy-id: policy-id }
+       )
+     )
+   )
+  
+   ;; Increment policy ID counter
+   (var-set next-policy-id (+ policy-id u1))
+  
+   (ok policy-id)
+ )
+)
+  
+;; Add a condition to policy
+(define-public (add-policy-condition
+ (policy-id uint)
+ (weather-type uint)
+ (operator uint)
+ (threshold-value uint)
+ (payout-percentage uint)
+ (oracle-id (string-ascii 36))
+)
+ (let
+   (
+     (policy (unwrap! (get-policy policy-id) (err ERR-POLICY-NOT-FOUND)))
+     (condition-index u0) ;; For simplicity, we only allow one condition per policy
+   )
+  
+   ;; Check if caller is policy holder
+   (asserts! (is-eq tx-sender (get policyholder policy)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Check if policy is active
+   (asserts! (is-eq (get policy-status policy) POLICY-STATUS-ACTIVE) (err ERR-POLICY-NOT-ACTIVE))
+  
+   ;; Check if oracle exists
+   (asserts! (is-some (get-oracle oracle-id)) (err ERR-ORACLE-NOT-REGISTERED))
+  
+   ;; Validate payout percentage (max 100%)
+   (asserts! (<= payout-percentage u10000) (err ERR-INVALID-PARAMETERS))
+  
+   ;; Add condition
+   (map-set policy-conditions
+     { policy-id: policy-id, condition-index: condition-index }
+     {
+       weather-type: weather-type,
+       operator: operator,
+       threshold-value: threshold-value,
+       payout-percentage: payout-percentage,
+  oracle-id: oracle-id
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+;; Submit a claim
+(define-public (submit-claim (policy-id uint))
+ (let
+   (
+     (policy (unwrap! (get-policy policy-id) (err ERR-POLICY-NOT-FOUND)))
+     (claim-id (var-get next-claim-id))
+     (claim-index u0) ;; For simplicity, we only allow one claim per policy
+   )
+  
+   ;; Check if caller is policy holder
+   (asserts! (is-eq tx-sender (get policyholder policy)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Check if policy is active
+   (asserts! (is-policy-active policy-id) (err ERR-POLICY-NOT-ACTIVE))
+  
+   ;; Check if policy hasn't been claimed yet
+   (asserts! (not (is-eq (get policy-status policy) POLICY-STATUS-CLAIMED)) (err ERR-ALREADY-CLAIMED))
+  
+   ;; Check if policy is claimable (condition met)
+   (asserts! (is-policy-claimable policy-id) (err ERR-CLAIM-CONDITION-NOT-MET))
+  
+   ;; Process the claim
+   (let
+     (
+       (condition (unwrap! (map-get? policy-conditions { policy-id: policy-id, condition-index: u0 }) (err ERR-INVALID-PARAMETERS)))
+       (oracle-data-value (unwrap! (get-latest-oracle-data (get oracle-id condition)) (err ERR-NO-ORACLE-DATA)))
+       (payout-percentage (get payout-percentage condition))
+
+            (claim-amount (/ (* (get coverage-amount policy) payout-percentage) u10000))
+     )
+    
+;; Create claim record
+     (map-set claims
+       { claim-id: claim-id }
+       {
+         policy-id: policy-id,
+         claimant: tx-sender,
+         claim-status: CLAIM-STATUS-APPROVED, ;; Auto-approved for parametric insurance
+         claim-amount: claim-amount,
+         weather-event-type: (get weather-type condition),
+         weather-event-value: (get value oracle-data-value),
+         condition-index: u0,
+         submitted-block: stacks-block-height,
+         processed-block: (some stacks-block-height),
+         paid-block: none,
+         oracle-data-block: stacks-block-height
+       }
+     )
+    
+     ;; Link claim to policy
+     (map-set policy-claims
+       { policy-id: policy-id, claim-index: claim-index }
+       { claim-id: claim-id }
+     )
+    
+     ;; Update policy status
+     (map-set policies
+       { policy-id: policy-id }
+       (merge policy {
+         policy-status: POLICY-STATUS-CLAIMED,
+last-updated: stacks-block-height
+       })
+     )
+    
+     ;; Increment claim ID counter
+     (var-set next-claim-id (+ claim-id u1))
+    
+     (ok claim-id)
+   )
+ )
+)
+
+
+;; Process claim payment
+(define-public (process-claim-payment (claim-id uint))
+ (let
+   (
+     (claim (unwrap! (get-claim claim-id) (err ERR-CLAIM-NOT-FOUND)))
+     (policy (unwrap! (get-policy (get policy-id claim)) (err ERR-POLICY-NOT-FOUND)))
+   )
+  
+   ;; Check if claim is approved but not paid
+   (asserts! (is-eq (get claim-status claim) CLAIM-STATUS-APPROVED) (err ERR-INVALID-PARAMETERS))
+   (asserts! (is-none (get paid-block claim)) (err ERR-ALREADY-CLAIMED))
+  
