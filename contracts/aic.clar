@@ -448,3 +448,31 @@
          (new-count (+ (get count existing-count) u1))
        )
        (map-set user-policy-count
+
+
+          { user: tx-sender }
+         { count: new-count }
+       )
+       (map-set user-policies
+         { user: tx-sender, index: (- new-count u1) }
+         { policy-id: policy-id }
+       )
+     )
+     (begin
+       (map-set user-policy-count
+         { user: tx-sender }
+         { count: u1 }
+       )
+       (map-set user-policies
+         { user: tx-sender, index: u0 }
+         { policy-id: policy-id }
+       )
+     )
+   )
+  
+   ;; Increment policy ID counter
+   (var-set next-policy-id (+ policy-id u1))
+  
+   (ok policy-id)
+ )
+)
