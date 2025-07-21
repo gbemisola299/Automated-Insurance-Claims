@@ -134,3 +134,44 @@
  }
 )
 
+
+
+;; Maps for claims
+(define-map claims
+ { claim-id: uint }
+ {
+   policy-id: uint,
+   claimant: principal,
+   claim-status: uint,
+   claim-amount: uint,
+   weather-event-type: uint,
+   weather-event-value: uint,
+   condition-index: uint,
+   submitted-block: uint,
+   processed-block: (optional uint),
+   paid-block: (optional uint),
+   oracle-data-block: uint
+ }
+)
+
+
+;; Maps for claim history by policy
+(define-map policy-claims
+ { policy-id: uint, claim-index: uint }
+ { claim-id: uint }
+)
+
+
+;; Maps for policy count by user
+(define-map user-policy-count
+ { user: principal }
+ { count: uint }
+)
+
+
+;; Maps for policy indices by user
+(define-map user-policies
+ { user: principal, index: uint }
+ { policy-id: uint }
+)
+
