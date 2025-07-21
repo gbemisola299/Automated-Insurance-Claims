@@ -122,4 +122,15 @@
  }
 )
 
+;; Maps for policy conditions (claim triggers)
+(define-map policy-conditions
+ { policy-id: uint, condition-index: uint }
+ {
+   weather-type: uint,
+   operator: uint,
+   threshold-value: uint,
+   payout-percentage: uint, ;; percentage of coverage to pay out (basis points)
+   oracle-id: (string-ascii 36)
+ }
+)
 
