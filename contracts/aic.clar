@@ -286,3 +286,165 @@
    false
  )
 )
+
+
+
+
+;; Helper function to check condition based on operator
+(define-read-only (condition-check (operator uint) (current-value uint) (threshold uint))
+ (if (is-eq operator OPERATOR-GREATER-THAN)
+   (> current-value threshold)
+   (if (is-eq operator OPERATOR-LESS-THAN)
+     (< current-value threshold)
+     (if (is-eq operator OPERATOR-EQUAL-TO)
+       (is-eq current-value threshold)
+       (if (is-eq operator OPERATOR-GREATER-THAN-OR-EQUAL)
+         (>= current-value threshold)
+         (if (is-eq operator OPERATOR-LESS-THAN-OR-EQUAL)
+           (<= current-value threshold)
+           false
+         )
+       )
+     )
+   )
+ )
+)
+
+
+;; Get all claims for a policy
+(define-read-only (get-policy-claims (policy-id uint))
+ ;; In a real implementation, this would return a list of all claims
+ ;; For simplicity, we just check if there's a claim at index 0
+ (map-get? policy-claims { policy-id: policy-id, claim-index: u0 })
+)
+
+
+;; Get treasury statistics
+(define-read-only (get-treasury-stats)
+ {
+   balance: (var-get treasury-balance),
+   total-premiums: (var-get total-premiums-collected),
+   total-claims-paid: (var-get total-claims-paid)
+ }
+)
+
+;; Public functions
+
+
+;; Register a new oracle
+(define-public (register-oracle
+ (oracle-id (string-ascii 36))
+ (oracle-name (string-utf8 100))
+ (oracle-type uint)
+)
+ (begin
+   ;; Only contract owner can register oracles
+   (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+  
+   (map-set oracle-registry
+     { oracle-id: oracle-id }
+     {
+       oracle-principal: tx-sender,
+       oracle-name: oracle-name,
+       oracle-type: oracle-type,
+       is-active: true,
+       registration-block: stacks-block-height
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+
+;; Submit oracle data
+(define-public (submit-oracle-data
+ (oracle-id (string-ascii 36))
+ (weather-type uint)
+ (location (string-utf8 100))
+ (value uint)
+ (timestamp uint)
+)
+ (let
+   (
+     (oracle (unwrap! (get-oracle oracle-id) (err ERR-ORACLE-NOT-REGISTERED)))
+   )
+  
+ ;; Only the registered oracle principal can submit data
+   (asserts! (is-eq tx-sender (get oracle-principal oracle)) (err ERR-NOT-AUTHORIZED))
+  
+   ;; Ensure oracle is active
+   (asserts! (get is-active oracle) (err ERR-ORACLE-NOT-REGISTERED))
+  
+   ;; Store oracle data
+   (map-set oracle-data
+     { oracle-id: oracle-id, block-height: stacks-block-height }
+     {
+       weather-type: weather-type,
+       location: location,
+       value: value,
+       timestamp: timestamp
+     }
+   )
+  
+   (ok true)
+ )
+)
+
+
+;; Create a new insurance policy
+(define-public (create-policy
+ (risk-profile-id uint)
+ (coverage-amount uint)
+ (duration-blocks uint)
+ (auto-renew bool)
+ (location (string-utf8 100))
+)
+ (let
+   (
+     (policy-id (var-get next-policy-id))
+     (risk-profile (unwrap! (get-risk-profile risk-profile-id) (err ERR-INVALID-RISK-PROFILE)))
+     (premium-result (unwrap! (calculate-premium risk-profile-id coverage-amount location) (err ERR-INVALID-PARAMETERS)))
+   )
+  
+   ;; Validate coverage amount
+   (asserts! (and
+              (>= coverage-amount (get min-coverage risk-profile))
+             (<= coverage-amount (get max-coverage risk-profile))
+             )
+             (err ERR-INVALID-COVERAGE-AMOUNT))
+  
+   ;; Collect premium payment
+   (try! (stx-transfer? premium-result tx-sender (as-contract tx-sender)))
+  
+   ;; Update treasury
+   (var-set treasury-balance (+ (var-get treasury-balance) premium-result))
+   (var-set total-premiums-collected (+ (var-get total-premiums-collected) premium-result))
+  
+   ;; Create policy
+   (map-set policies
+     { policy-id: policy-id }
+     {
+       policyholder: tx-sender,
+       risk-profile-id: risk-profile-id,
+       coverage-amount: coverage-amount,
+       premium-amount: premium-result,
+       start-block: stacks-block-height,
+       end-block: (+ stacks-block-height duration-blocks),
+       policy-status: POLICY-STATUS-ACTIVE,
+       renewal-count: u0,
+       auto-renew: auto-renew,
+       location: location,
+       created-at: stacks-block-height,
+       last-updated: stacks-block-height
+     }
+   )
+  
+   ;; Update user policy tracking
+   (match (map-get? user-policy-count { user: tx-sender })
+     existing-count
+     (let
+       (
+         (new-count (+ (get count existing-count) u1))
+       )
+       (map-set user-policy-count
